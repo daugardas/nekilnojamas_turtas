@@ -1,6 +1,11 @@
-import { ActionFunction, json, redirect } from "@remix-run/node";
-import { Form, Link, useLoaderData, useActionData } from "@remix-run/react";
-import { MysqlError } from "mysql";
+import { ActionFunction, LoaderArgs, json, redirect } from "@remix-run/node";
+import {
+  Form,
+  Link,
+  useLoaderData,
+  useActionData,
+  useSubmit,
+} from "@remix-run/react";
 import { useEffect, useState } from "react";
 import { AsmuoModel } from "~/Models/AsmuoModel";
 import { MokejimasModel } from "~/Models/MokejimasModel";
@@ -12,7 +17,8 @@ import {
   getNekilnojamasTurtasTipai,
 } from "~/Models/nekilnojami-turtai.server";
 import { getPaskolos, getPaskolosBusenos } from "~/Models/paskolos.server";
-import { connection } from "~/entry.server";
+import { sendQuery } from "~/Services/queryDB";
+import { NekilnojamasTurtasModel } from "~/Models/NekilnojamasTurtasModel";
 
 type LoaderData = {
   asmenys: Awaited<ReturnType<typeof getAsmenys>>;
@@ -25,7 +31,7 @@ type LoaderData = {
   paskolosBusenos: Awaited<ReturnType<typeof getPaskolosBusenos>>;
 };
 
-export const loader = async (): Promise<LoaderData> => {
+export const loader = async ({ params }: LoaderArgs): Promise<LoaderData> => {
   return {
     asmenys: await getAsmenys(),
     paskolos: await getPaskolos(),
@@ -47,34 +53,178 @@ export const action: ActionFunction = async ({ request }) => {
   const nt_energetine_klase = form.get("energetine_klase");
   const nt_savininko_asmens_kodas = form.get("savininkas");
 
-  const insert_query = `
-    INSERT INTO nekilnojami_turtai (plotas, pastatymo_metai, renovacijos_metai, adresas, verte, tipas, energine_klase, fk_ASMUOasmens_kodas)
-    VALUES (${nt_plotas}, DATE_FORMAT('${nt_pastatymo_metai}', '%Y-%m-%d'), DATE_FORMAT('${nt_renovacijos_metai}', '%Y-%m-%d'), '${nt_adresas}', ${nt_verte}, '${nt_tipas}', '${nt_energetine_klase}', ${nt_savininko_asmens_kodas})
-  `;
+  let insert_query;
 
-  console.log(insert_query);
+  if (nt_renovacijos_metai && nt_renovacijos_metai?.length > 0)
+    insert_query = `
+      INSERT INTO nekilnojami_turtai (plotas, pastatymo_metai, renovacijos_metai, adresas, verte, tipas, energine_klase, fk_ASMUOasmens_kodas)
+      VALUES (${nt_plotas}, DATE_FORMAT('${nt_pastatymo_metai}', '%Y-%m-%d'), ${
+      nt_renovacijos_metai.length > 0
+        ? `DATE_FORMAT('${nt_renovacijos_metai}', '%Y-%m-%d')`
+        : "null"
+    }, '${nt_adresas}', ${nt_verte}, '${nt_tipas}', '${nt_energetine_klase}', ${nt_savininko_asmens_kodas})`;
+  else {
+    insert_query = `
+      INSERT INTO nekilnojami_turtai (plotas, pastatymo_metai, adresas, verte, tipas, energine_klase, fk_ASMUOasmens_kodas)
+      VALUES (${nt_plotas}, DATE_FORMAT('${nt_pastatymo_metai}', '%Y-%m-%d'), '${nt_adresas}', ${nt_verte}, '${nt_tipas}', '${nt_energetine_klase}', ${nt_savininko_asmens_kodas})`;
+  }
 
   try {
-    const responseFromDB = new Promise((resolve, reject) => {
-      const stringWithoutNewLines = insert_query.replace(/(\r\n|\n|\r)/gm, "");
-      connection.query(
-        stringWithoutNewLines,
-        (err: MysqlError, response: any) => {
-          if (err) {
-            console.log(err);
-            reject(err);
-          } else {
-            console.log(response);
-            resolve(response);
-          }
-        }
-      );
-    });
-
-    console.log(await responseFromDB);
+    await sendQuery(insert_query);
   } catch (err) {
     console.log(err);
   }
+
+  /* PASKOLOS */
+  const paskolos: PaskolaModel[] = JSON.parse(form.get("paskolos") as string);
+  if (paskolos.length > 0) {
+    // firstly check which paskolos were already existing in the database, so that we only have to UPDATE them
+    const existingPaskolos_query = `SELECT numeris FROM paskolos WHERE fk_ASMUOasmens_kodas=${nt_savininko_asmens_kodas}`;
+    let existingPaskolos: { numeris: number }[] = [];
+    try {
+      const responseFromDB: { numeris: number }[] = await sendQuery(
+        existingPaskolos_query
+      );
+      existingPaskolos = responseFromDB;
+    } catch (err) {
+      console.log(err);
+    }
+
+    // now for each existing paskola we check it agains the paskolos that were sent from the frontend and if they match, we update them
+
+    let insertedPaskolaNewNumeriai: { prevId: number; newId: number }[] = [];
+    for (const paskola of paskolos) {
+      const {
+        numeris,
+        suteikianti_imone,
+        suma,
+        palukanos,
+        suteikimo_data,
+        busena,
+        fk_ASMUOasmens_kodas,
+      } = paskola;
+
+      const existingPaskola = existingPaskolos.find(
+        (paskola) => paskola.numeris === numeris
+      );
+
+      if (existingPaskola) {
+        const updatePaskola_query = `
+      UPDATE paskolos
+      SET suteikianti_imone = '${suteikianti_imone}', suma = ${suma}, palukanos = ${palukanos}, suteikimo_data = DATE_FORMAT('${suteikimo_data}', '%Y-%m-%d'), busena = '${busena}', fk_ASMUOasmens_kodas = '${fk_ASMUOasmens_kodas}'
+      WHERE numeris = ${numeris}
+      `;
+        try {
+          await sendQuery(updatePaskola_query);
+        } catch (err) {
+          console.log(err);
+        }
+      } else {
+        const insertPaskola_query = `
+      INSERT INTO paskolos
+      (suteikianti_imone, suma, palukanos, suteikimo_data, busena, fk_ASMUOasmens_kodas)
+      VALUES
+      ('${suteikianti_imone}', ${suma}, ${palukanos}, DATE_FORMAT('${suteikimo_data}', '%Y-%m-%d'), '${busena}', '${fk_ASMUOasmens_kodas}')
+      `;
+        try {
+          const responseFromDB: any = await sendQuery(insertPaskola_query);
+          insertedPaskolaNewNumeriai.push({
+            prevId: numeris,
+            newId: responseFromDB.insertId,
+          });
+        } catch (err) {
+          console.log(err);
+        }
+      }
+    }
+
+    // now we have to delete all paskolos that were not sent from the frontend, because user wanted to delete them
+    const paskolosToDelete = paskolos.map((paskola) => paskola.numeris);
+
+    const deletePaskolos_query = `
+  DELETE FROM paskolos
+  WHERE fk_ASMUOasmens_kodas=${nt_savininko_asmens_kodas} AND numeris NOT IN (${paskolosToDelete})
+  `;
+    try {
+      await sendQuery(deletePaskolos_query);
+    } catch (err) {
+      console.log(err);
+    }
+  }
+
+  // now that we have also inserted new paskolos, we have to update the mokejimai which were still not updated in database or inserted
+  // we already know the new generated numeris for the inserted paskolas (variable 'insertedPaskolaNewNumeriai'), so we can use it to update the mokejimai
+  const newMokejimai: MokejimasModel[] = JSON.parse(
+    form.get("mokejimai") as string
+  );
+
+  if (newMokejimai.length > 0) {
+    let existingMokejimaiInDB: MokejimasModel[] = [];
+    const existingMokejimai_query = `SELECT * FROM mokejimai WHERE fk_ASMUOasmens_kodas=${nt_savininko_asmens_kodas}`;
+    try {
+      const responseFromDB: MokejimasModel[] = await sendQuery(
+        existingMokejimai_query
+      );
+      existingMokejimaiInDB = responseFromDB;
+    } catch (err) {
+      console.log(err);
+    }
+
+    for (const mokejimas of newMokejimai) {
+      const {
+        israso_nr,
+        israsymo_data,
+        suma,
+        fk_ASMUOasmens_kodas,
+        fk_PASKOLAnumeris,
+      } = mokejimas;
+
+      const existingMokejimas = existingMokejimaiInDB.find(
+        (mokejimas) => mokejimas.israso_nr === israso_nr
+      );
+
+      if (existingMokejimas) {
+        const updateMokejimas_query = `
+      UPDATE mokejimai
+      SET suma = ${suma}, fk_ASMUOasmens_kodas = '${fk_ASMUOasmens_kodas}', fk_PASKOLAnumeris = ${fk_PASKOLAnumeris}
+      WHERE israsymo_data = DATE_FORMAT('${israsymo_data}', '%Y-%m-%d') AND fk_PASKOLAnumeris = ${fk_PASKOLAnumeris}
+      `;
+        try {
+          await sendQuery(updateMokejimas_query);
+        } catch (err) {
+          console.log(err);
+        }
+      } else {
+        const insertMokejimas_query = `
+      INSERT INTO mokejimai
+      (israsymo_data, suma, fk_ASMUOasmens_kodas, fk_PASKOLAnumeris)
+      VALUES
+      (DATE_FORMAT('${israsymo_data}', '%Y-%m-%d'), ${suma}, '${fk_ASMUOasmens_kodas}', ${fk_PASKOLAnumeris})
+      `;
+        try {
+          await sendQuery(insertMokejimas_query);
+        } catch (err) {
+          console.log(err);
+        }
+      }
+    }
+
+    // now we have to delete all mokejimai that were not sent from the frontend, because user wanted to delete them
+    const mokejimaiToDelete = newMokejimai.map(
+      (mokejimas) => mokejimas.israso_nr
+    );
+
+    const deleteMokejimai_query = `
+  DELETE FROM mokejimai
+  WHERE fk_ASMUOasmens_kodas=${nt_savininko_asmens_kodas} AND israso_nr NOT IN (${mokejimaiToDelete})
+  `;
+    try {
+      await sendQuery(deleteMokejimai_query);
+    } catch (err) {
+      console.log(err);
+    }
+  }
+
   return redirect("/F1");
 };
 
@@ -87,9 +237,19 @@ export default function F2() {
     mokejimai,
     paskolosBusenos,
   } = useLoaderData<LoaderData>();
-
-  const data = useActionData();
-
+  const submit = useSubmit();
+  const [nekilnojamas_turtas, setNekilnojamasTurtas] =
+    useState<NekilnojamasTurtasModel>({
+      objekto_id: -1,
+      adresas: "",
+      plotas: 0,
+      pastatymo_metai: "",
+      renovacijos_metai: "",
+      verte: 0,
+      tipas: 1,
+      energine_klase: 1,
+      fk_ASMUOasmens_kodas: 0,
+    });
   const [savininkas, setSavininkas] = useState<AsmuoModel | null>(null);
   const [paskolosOfAsmuo, setPaskolosOfAsmuo] = useState<PaskolaModel[] | null>(
     null
@@ -99,7 +259,18 @@ export default function F2() {
   >(null);
   useEffect(() => {
     if (savininkas == null && asmenys.length > 0) {
-      setSavininkas(asmenys[0]);
+      const nt_savininkas = asmenys[0];
+
+      if (nt_savininkas != null)
+        setSavininkas({
+          asmens_kodas: nt_savininkas.asmens_kodas,
+          vardas: nt_savininkas.vardas,
+          pavarde: nt_savininkas.pavarde,
+          gimimo_data: nt_savininkas.gimimo_data,
+          tel_nr: nt_savininkas.tel_nr,
+          el_pastas: nt_savininkas.el_pastas,
+          deklaruota_gyv_vieta: nt_savininkas.deklaruota_gyv_vieta,
+        });
     } else if (savininkas != null) {
       const paskolosOfAsmuo = paskolos.filter((paskola) => {
         return paskola.fk_ASMUOasmens_kodas == savininkas.asmens_kodas;
@@ -138,8 +309,18 @@ export default function F2() {
 
   const onClickAddPaskola = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
+    let newNumeris =
+      paskolos.reduce((max, p) => Math.max(p.numeris, max), 0) + 1;
+    let paskolosOfAsmuoHighestNumeris: number = 0;
+    if (paskolosOfAsmuo != null)
+      paskolosOfAsmuoHighestNumeris =
+        paskolosOfAsmuo?.reduce((max, p) => Math.max(p.numeris, max), 0) + 1;
+
     const paskola: PaskolaModel = {
-      numeris: paskolos.length + 1,
+      numeris:
+        newNumeris > paskolosOfAsmuoHighestNumeris
+          ? newNumeris
+          : paskolosOfAsmuoHighestNumeris,
       suteikianti_imone: "",
       palukanos: 0,
       suma: 0,
@@ -151,10 +332,46 @@ export default function F2() {
     else setPaskolosOfAsmuo([...paskolosOfAsmuo, paskola]);
   };
 
+  const onChangePaskola = (
+    e:
+      | React.ChangeEvent<HTMLInputElement>
+      | React.ChangeEvent<HTMLSelectElement>,
+    paskola: PaskolaModel
+  ) => {
+    let newPaskola: PaskolaModel;
+
+    if (e.target.name === "suma" || e.target.name === "palukanos") {
+      newPaskola = {
+        ...paskola,
+        [e.target.name]: Number(e.target.value),
+      };
+    } else {
+      newPaskola = {
+        ...paskola,
+        [e.target.name]: e.target.value,
+      };
+    }
+    const newPaskolos = paskolosOfAsmuo?.map((p) => {
+      if (p === paskola) return newPaskola;
+      return p;
+    });
+    if (newPaskolos != null) setPaskolosOfAsmuo(newPaskolos);
+  };
+
   const onClickAddMokejimas = (e: React.MouseEvent<HTMLButtonElement>) => {
     e.preventDefault();
+    let newNumeris =
+      mokejimai.reduce((max, m) => Math.max(m.israso_nr, max), 0) + 1;
+    let mokejimaiOfAsmuoHighestNumeris: number = 0;
+    if (mokejimaiOfAsmuo != null)
+      mokejimaiOfAsmuoHighestNumeris =
+        mokejimaiOfAsmuo?.reduce((max, m) => Math.max(m.israso_nr, max), 0) + 1;
+
     const mokejimas: MokejimasModel = {
-      israso_nr: mokejimai.length + 1,
+      israso_nr:
+        newNumeris > mokejimaiOfAsmuoHighestNumeris
+          ? newNumeris
+          : mokejimaiOfAsmuoHighestNumeris,
       suma: 0,
       israsymo_data: new Date().toLocaleDateString("lt-LT"),
       fk_ASMUOasmens_kodas: savininkas?.asmens_kodas as number,
@@ -165,11 +382,88 @@ export default function F2() {
     else setMokejimaiOfAsmuo([...mokejimaiOfAsmuo, mokejimas]);
   };
 
+  const onClickRemovePaskola = (rmPaskola: PaskolaModel) => {
+    const newPaskolos = paskolosOfAsmuo?.filter((p) => p != rmPaskola);
+    if (newPaskolos != null) setPaskolosOfAsmuo(newPaskolos);
+  };
+
+  const onClickRemoveMokejimas = (rmMokejimas: MokejimasModel) => {
+    const newMokejimai = mokejimaiOfAsmuo?.filter((m) => m != rmMokejimas);
+    if (newMokejimai != null) setMokejimaiOfAsmuo(newMokejimai);
+  };
+
+  const onChangeMokejimas = (
+    e:
+      | React.ChangeEvent<HTMLInputElement>
+      | React.ChangeEvent<HTMLSelectElement>,
+    mokejimas: MokejimasModel
+  ) => {
+    let newMokejimas: MokejimasModel;
+
+    if (e.target.name === "suma" || e.target.name === "fk_PASKOLAnumeris") {
+      newMokejimas = {
+        ...mokejimas,
+        [e.target.name]: Number(e.target.value),
+      };
+    } else {
+      newMokejimas = {
+        ...mokejimas,
+        [e.target.name]: e.target.value,
+      };
+    }
+
+    const newMokejimai = mokejimaiOfAsmuo?.map((m) => {
+      if (m === mokejimas) return newMokejimas;
+      return m;
+    });
+
+    if (newMokejimai != null) setMokejimaiOfAsmuo(newMokejimai);
+  };
+
+  const onChangeNekilnojamasTurtas = (
+    e:
+      | React.ChangeEvent<HTMLInputElement>
+      | React.ChangeEvent<HTMLSelectElement>,
+    nekilnojamasTurtas: NekilnojamasTurtasModel
+  ) => {
+    let newNekilnojamasTurtas: NekilnojamasTurtasModel;
+
+    if (e.target.name === "plotas" || e.target.name === "verte") {
+      let newValue = Number(e.target.value);
+      if (Number.isNaN(Number(e.target.value)))
+        newValue = nekilnojamasTurtas[e.target.name] as number;
+      newNekilnojamasTurtas = {
+        ...nekilnojamasTurtas,
+        [e.target.name]: newValue,
+      };
+    } else {
+      newNekilnojamasTurtas = {
+        ...nekilnojamasTurtas,
+        [e.target.name]: e.target.value,
+      };
+    }
+
+    setNekilnojamasTurtas(newNekilnojamasTurtas);
+  };
+
+  const onSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    let formData = new FormData(e.currentTarget);
+
+    if (savininkas) {
+      formData.append("savininkas", savininkas.asmens_kodas.toString());
+    }
+
+    formData.append("paskolos", JSON.stringify(paskolosOfAsmuo));
+    formData.append("mokejimai", JSON.stringify(mokejimaiOfAsmuo));
+    submit(formData, { method: "PUT" });
+  };
+
   return (
     <div className="flex justify-center">
       <Form
         className="bg-white shadow-md rounded px-8 pt-6 pb-8 mb-4 "
-        method="post"
+        onSubmit={onSubmit}
       >
         {/* NAUJAS NT IR SAVININKAS */}
         <div className="flex flex-row">
@@ -182,6 +476,10 @@ export default function F2() {
               type="text"
               placeholder="Plotas"
               name="plotas"
+              value={nekilnojamas_turtas.plotas}
+              onChange={(e) =>
+                onChangeNekilnojamasTurtas(e, nekilnojamas_turtas)
+              }
             />
           </div>
           <div className="mb-4">
@@ -195,6 +493,10 @@ export default function F2() {
               type="date"
               placeholder="Pastatymo metai"
               name="pastatymo_metai"
+              value={nekilnojamas_turtas.pastatymo_metai.split("T")[0]}
+              onChange={(e) =>
+                onChangeNekilnojamasTurtas(e, nekilnojamas_turtas)
+              }
             />
           </div>
           <div className="mb-4">
@@ -202,12 +504,19 @@ export default function F2() {
               Renovacijos metai
             </label>
             <input
-              required
               className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
               id="renovacijos_metai"
               type="date"
               placeholder="Renovacijos metai"
               name="renovacijos_metai"
+              value={
+                nekilnojamas_turtas.renovacijos_metai
+                  ? nekilnojamas_turtas.renovacijos_metai.split("T")[0]
+                  : ""
+              }
+              onChange={(e) =>
+                onChangeNekilnojamasTurtas(e, nekilnojamas_turtas)
+              }
             />
           </div>
           <div className="mb-4">
@@ -221,6 +530,10 @@ export default function F2() {
               type="text"
               placeholder="Adresas"
               name="adresas"
+              value={nekilnojamas_turtas.adresas}
+              onChange={(e) =>
+                onChangeNekilnojamasTurtas(e, nekilnojamas_turtas)
+              }
             />
           </div>
           <div className="mb-4">
@@ -232,11 +545,19 @@ export default function F2() {
               type="text"
               placeholder="Vertė"
               name="verte"
+              value={nekilnojamas_turtas.verte}
+              onChange={(e) =>
+                onChangeNekilnojamasTurtas(e, nekilnojamas_turtas)
+              }
             />
           </div>
           <div className="mb-4">
             <label className="block text-gray-700 font-bold mb-2">Tipas</label>
             <select
+              onChange={(e) =>
+                onChangeNekilnojamasTurtas(e, nekilnojamas_turtas)
+              }
+              value={nekilnojamas_turtas.tipas}
               name="tipas"
               id="tipas"
               className="block w-full bg-gray-200 border border-gray-200 text-gray-700 rounded py-3 px-4 leading-tight focus:outline-none focus:bg-white focus:border-gray-500"
@@ -253,6 +574,10 @@ export default function F2() {
               Energetinė klasė
             </label>
             <select
+              onChange={(e) =>
+                onChangeNekilnojamasTurtas(e, nekilnojamas_turtas)
+              }
+              value={nekilnojamas_turtas.energine_klase}
               name="energetine_klase"
               id="energetine_klase"
               className="block w-full bg-gray-200 border border-gray-200 text-gray-700 rounded py-3 px-4 leading-tight focus:outline-none focus:bg-white focus:border-gray-500"
@@ -295,6 +620,12 @@ export default function F2() {
             <div className="flex flex-row" key={paskola.numeris}>
               <div className="mb-4">
                 <label className="block text-gray-700 font-bold mb-2">
+                  Paskolos nr.
+                </label>
+                <div>{paskola.numeris}</div>
+              </div>
+              <div className="mb-4">
+                <label className="block text-gray-700 font-bold mb-2">
                   Suteikianti įmonė
                 </label>
                 <input
@@ -305,6 +636,7 @@ export default function F2() {
                   placeholder="Suteikianti įmonė"
                   name="suteikianti_imone"
                   value={paskola.suteikianti_imone}
+                  onChange={(e) => onChangePaskola(e, paskola)}
                 />
               </div>
               <div className="mb-4">
@@ -319,6 +651,7 @@ export default function F2() {
                   placeholder="Suma"
                   name="suma"
                   value={paskola.suma}
+                  onChange={(e) => onChangePaskola(e, paskola)}
                 />
               </div>
               <div className="mb-4">
@@ -333,6 +666,7 @@ export default function F2() {
                   placeholder="Palūkanos"
                   name="palukanos"
                   value={paskola.palukanos}
+                  onChange={(e) => onChangePaskola(e, paskola)}
                 />
               </div>
               <div className="mb-4">
@@ -347,6 +681,7 @@ export default function F2() {
                   placeholder="Suteikimo data"
                   name="suteikimo_data"
                   value={paskola.suteikimo_data.split("T")[0]}
+                  onChange={(e) => onChangePaskola(e, paskola)}
                 />
               </div>
               <div className="mb-4">
@@ -355,6 +690,7 @@ export default function F2() {
                 </label>
                 <select
                   value={paskola.busena}
+                  onChange={(e) => onChangePaskola(e, paskola)}
                   name="busena"
                   id="busena"
                   className="block w-full bg-gray-200 border border-gray-200 text-gray-700 rounded py-3 px-4 leading-tight focus:outline-none focus:bg-white focus:border-gray-500"
@@ -368,7 +704,14 @@ export default function F2() {
               </div>
 
               <div className="flex">
-                <button className="bg-red-500 hover:bg-red-700 text-white font-bold py-1 px-2 rounded">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    onClickRemovePaskola(paskola);
+                  }}
+                  className="bg-red-500 hover:bg-red-700 text-white font-bold py-1 px-2 rounded"
+                >
                   Šalinti
                 </button>
               </div>
@@ -394,7 +737,7 @@ export default function F2() {
 
         {mokejimaiOfAsmuo ? (
           mokejimaiOfAsmuo.map((mokejimas) => (
-            <div className="flex flex-row">
+            <div key={mokejimas.israso_nr} className="flex flex-row">
               <div className="mb-4">
                 <label className="block text-gray-700 font-bold mb-2">
                   Mokėjimo suma
@@ -402,10 +745,12 @@ export default function F2() {
                 <input
                   required
                   className="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:shadow-outline"
-                  id="mokejimo_suma"
+                  id="suma"
                   type="text"
                   placeholder="Mokėjimo suma"
-                  name="mokejimo_suma"
+                  name="suma"
+                  value={mokejimas.suma}
+                  onChange={(e) => onChangeMokejimas(e, mokejimas)}
                 />
               </div>
               <div className="mb-4">
@@ -413,8 +758,10 @@ export default function F2() {
                   Paskola
                 </label>
                 <select
-                  name="paskola"
-                  id="paskola"
+                  value={mokejimas.fk_PASKOLAnumeris}
+                  onChange={(e) => onChangeMokejimas(e, mokejimas)}
+                  name="fk_PASKOLAnumeris"
+                  id="fk_PASKOLAnumeris"
                   className="block w-full bg-gray-200 border border-gray-200 text-gray-700 rounded py-3 px-4 leading-tight focus:outline-none focus:bg-white focus:border-gray-500"
                 >
                   {paskolosOfAsmuo
@@ -427,7 +774,14 @@ export default function F2() {
                 </select>
               </div>
               <div className="flex">
-                <button className="bg-red-500 hover:bg-red-700 text-white font-bold py-1 px-2 rounded">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    onClickRemoveMokejimas(mokejimas);
+                  }}
+                  className="bg-red-500 hover:bg-red-700 text-white font-bold py-1 px-2 rounded"
+                >
                   Šalinti
                 </button>
               </div>

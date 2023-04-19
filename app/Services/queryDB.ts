@@ -11,7 +11,6 @@ export const sendQuery = async <T>(query: string): Promise<T[]> =>
           console.log(err);
           reject(err);
         } else {
-          console.log(response);
           resolve(response);
         }
       }

@@ -1,8 +1,8 @@
 export type NekilnojamasTurtasModel = {
   objekto_id: number;
   plotas: number;
-  pastatymo_metai: Date;
-  renovacijos_metai: Date;
+  pastatymo_metai: string;
+  renovacijos_metai?: string;
   adresas: string;
   verte: number;
   tipas: number;
