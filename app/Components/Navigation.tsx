@@ -5,18 +5,6 @@ export default function Navigation() {
     <nav>
       <div className="flex justify-center bg-gray-200">
         <NavLink
-          to="/"
-          className={({ isActive }) =>
-            `px-3 py-2 rounded-full text-gray-800 font-bold ${
-              isActive
-                ? "bg-gray-300 hover:bg-gray-400"
-                : "bg-gray-100 hover:bg-gray-200"
-            }`
-          }
-        >
-          Home
-        </NavLink>
-        <NavLink
           to="/asmenys"
           className={({ isActive }) =>
             `px-3 py-2 rounded-full text-gray-800 font-bold ${
@@ -135,6 +123,18 @@ export default function Navigation() {
           }
         >
           F4
+        </NavLink>
+        <NavLink
+          to="/ataskaita"
+          className={({ isActive }) =>
+            `px-3 py-2 rounded-full text-gray-800 font-bold ${
+              isActive
+                ? "bg-gray-300 hover:bg-gray-400"
+                : "bg-gray-100 hover:bg-gray-200"
+            }`
+          }
+        >
+          Ataskaita
         </NavLink>
       </div>
     </nav>

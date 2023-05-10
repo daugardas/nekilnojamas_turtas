@@ -3,7 +3,6 @@ import {
   Form,
   Link,
   useLoaderData,
-  useActionData,
   useSubmit,
 } from "@remix-run/react";
 import { useEffect, useState } from "react";
@@ -53,12 +52,18 @@ export const action: ActionFunction = async ({ request }) => {
   const nt_plotas = form.get("plotas");
   const nt_pastatymo_metai = form.get("pastatymo_metai");
   const nt_renovacijos_metai = form.get("renovacijos_metai");
-  const nt_adresas = form.get("adresas");
+  let nt_adresas: string = form.get("adresas") as string;
   const nt_verte = form.get("verte");
   const nt_tipas = form.get("tipas");
   const nt_energetine_klase = form.get("energetine_klase");
   const nt_savininko_asmens_kodas = form.get("savininkas");
   let update_query: string;
+
+  if(nt_adresas.includes("'")){
+    // add escape character to ' so that it doesn't break the query
+
+    nt_adresas = nt_adresas.replace("'", "\\'");
+  }
 
   if (nt_renovacijos_metai && nt_renovacijos_metai?.length > 0) {
     update_query = `
@@ -73,12 +78,89 @@ export const action: ActionFunction = async ({ request }) => {
     WHERE objekto_id = ${form.get("objekto_id")}
     `;
   }
-
+  //console.log(update_query);
   try {
     const result = await sendQuery(update_query);
   } catch (err) {
     console.log(err);
   }
+
+  
+  // now that we have also inserted new paskolos, we have to update the mokejimai which were still not updated in database or inserted
+  // we already know the new generated numeris for the inserted paskolas (variable 'insertedPaskolaNewNumeriai'), so we can use it to update the mokejimai
+  const newMokejimai: MokejimasModel[] = JSON.parse(
+    form.get("mokejimai") as string
+  );
+
+  if (newMokejimai.length > 0) {
+    let existingMokejimaiInDB: MokejimasModel[] = [];
+    const existingMokejimai_query = `SELECT * FROM mokejimai WHERE fk_ASMUOasmens_kodas=${nt_savininko_asmens_kodas}`;
+    try {
+      const responseFromDB: MokejimasModel[] = await sendQuery(
+        existingMokejimai_query
+      );
+      existingMokejimaiInDB = responseFromDB;
+    } catch (err) {
+      console.log(err);
+    }
+
+    for (const mokejimas of newMokejimai) {
+      const {
+        israso_nr,
+        israsymo_data,
+        suma,
+        fk_ASMUOasmens_kodas,
+        fk_PASKOLAnumeris,
+      } = mokejimas;
+
+      const existingMokejimas = existingMokejimaiInDB.find(
+        (mokejimas) => mokejimas.israso_nr === israso_nr
+      );
+
+      console.log(existingMokejimas);
+      console.log(mokejimas);
+
+      if (existingMokejimas) {
+        const updateMokejimas_query = `
+      UPDATE mokejimai
+      SET suma = ${suma}, fk_ASMUOasmens_kodas = '${fk_ASMUOasmens_kodas}', fk_PASKOLAnumeris = ${fk_PASKOLAnumeris}
+      WHERE israso_nr = ${israso_nr}`;
+      console.log(updateMokejimas_query);
+        try {
+          await sendQuery(updateMokejimas_query);
+        } catch (err) {
+          console.log(err);
+        }
+      } else {
+        const insertMokejimas_query = `
+      INSERT INTO mokejimai
+      (israsymo_data, suma, fk_ASMUOasmens_kodas, fk_PASKOLAnumeris)
+      VALUES
+      (DATE_FORMAT('${israsymo_data}', '%Y-%m-%d'), ${suma}, '${fk_ASMUOasmens_kodas}', ${fk_PASKOLAnumeris})`;
+        try {
+          await sendQuery(insertMokejimas_query);
+        } catch (err) {
+          console.log(err);
+        }
+      }
+    }
+
+    // now we have to delete all mokejimai that were not sent from the frontend, because user wanted to delete them
+    const mokejimaiToDelete = newMokejimai.map(
+      (mokejimas) => mokejimas.israso_nr
+    );
+
+    const deleteMokejimai_query = `
+  DELETE FROM mokejimai
+  WHERE fk_ASMUOasmens_kodas=${nt_savininko_asmens_kodas} AND israso_nr NOT IN (${mokejimaiToDelete})
+  `;
+    try {
+      await sendQuery(deleteMokejimai_query);
+    } catch (err) {
+      console.log(err);
+    }
+  }
+
 
   /* PASKOLOS */
   const paskolos: PaskolaModel[] = JSON.parse(form.get("paskolos") as string);
@@ -157,77 +239,6 @@ export const action: ActionFunction = async ({ request }) => {
     const deletePaskolos_query = `DELETE FROM paskolos WHERE fk_ASMUOasmens_kodas=${nt_savininko_asmens_kodas} AND numeris NOT IN (${paskolosToDelete})`;
     try {
       await sendQuery(deletePaskolos_query);
-    } catch (err) {
-      console.log(err);
-    }
-  }
-
-  // now that we have also inserted new paskolos, we have to update the mokejimai which were still not updated in database or inserted
-  // we already know the new generated numeris for the inserted paskolas (variable 'insertedPaskolaNewNumeriai'), so we can use it to update the mokejimai
-  const newMokejimai: MokejimasModel[] = JSON.parse(
-    form.get("mokejimai") as string
-  );
-
-  if (newMokejimai.length > 0) {
-    let existingMokejimaiInDB: MokejimasModel[] = [];
-    const existingMokejimai_query = `SELECT * FROM mokejimai WHERE fk_ASMUOasmens_kodas=${nt_savininko_asmens_kodas}`;
-    try {
-      const responseFromDB: MokejimasModel[] = await sendQuery(
-        existingMokejimai_query
-      );
-      existingMokejimaiInDB = responseFromDB;
-    } catch (err) {
-      console.log(err);
-    }
-
-    for (const mokejimas of newMokejimai) {
-      const {
-        israso_nr,
-        israsymo_data,
-        suma,
-        fk_ASMUOasmens_kodas,
-        fk_PASKOLAnumeris,
-      } = mokejimas;
-
-      const existingMokejimas = existingMokejimaiInDB.find(
-        (mokejimas) => mokejimas.israso_nr === israso_nr
-      );
-
-      if (existingMokejimas) {
-        const updateMokejimas_query = `
-      UPDATE mokejimai
-      SET suma = ${suma}, fk_ASMUOasmens_kodas = '${fk_ASMUOasmens_kodas}', fk_PASKOLAnumeris = ${fk_PASKOLAnumeris}
-      WHERE israsymo_data = DATE_FORMAT('${israsymo_data}', '%Y-%m-%d') AND fk_PASKOLAnumeris = ${fk_PASKOLAnumeris}`;
-        try {
-          await sendQuery(updateMokejimas_query);
-        } catch (err) {
-          console.log(err);
-        }
-      } else {
-        const insertMokejimas_query = `
-      INSERT INTO mokejimai
-      (israsymo_data, suma, fk_ASMUOasmens_kodas, fk_PASKOLAnumeris)
-      VALUES
-      (DATE_FORMAT('${israsymo_data}', '%Y-%m-%d'), ${suma}, '${fk_ASMUOasmens_kodas}', ${fk_PASKOLAnumeris})`;
-        try {
-          await sendQuery(insertMokejimas_query);
-        } catch (err) {
-          console.log(err);
-        }
-      }
-    }
-
-    // now we have to delete all mokejimai that were not sent from the frontend, because user wanted to delete them
-    const mokejimaiToDelete = newMokejimai.map(
-      (mokejimas) => mokejimas.israso_nr
-    );
-
-    const deleteMokejimai_query = `
-  DELETE FROM mokejimai
-  WHERE fk_ASMUOasmens_kodas=${nt_savininko_asmens_kodas} AND israso_nr NOT IN (${mokejimaiToDelete})
-  `;
-    try {
-      await sendQuery(deleteMokejimai_query);
     } catch (err) {
       console.log(err);
     }
@@ -402,6 +413,8 @@ export default function F2() {
       | React.ChangeEvent<HTMLSelectElement>,
     mokejimas: MokejimasModel
   ) => {
+
+    console.log("mokejimas pasikeite");
     let newMokejimas: MokejimasModel;
 
     if (e.target.name === "suma" || e.target.name === "fk_PASKOLAnumeris") {
